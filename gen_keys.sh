@@ -1,13 +1,13 @@
 #!/bin/bash
 
-# === Hysteria 2 — Добавление нового пользователя ===
+# === Hysteria 2 — Добавление пользователей ===
 #
 # Запуск:
-#   bash gen_keys.sh                     — добавить 1 пользователя
-#   bash gen_keys.sh --count 5           — добавить 5 пользователей
-#   bash gen_keys.sh --name alice        — добавить пользователя с именем alice
+#   bash gen_keys.sh                  — добавить 1 пользователя
+#   bash gen_keys.sh --count 5        — добавить 5 пользователей
+#   bash gen_keys.sh --name alice     — добавить пользователя с именем alice
 #
-# Через curl (аргументы передаются в bash, не в curl):
+# Через curl:
 #   bash <(curl -sL https://raw.githubusercontent.com/AFH666/hysteria2_afh/main/gen_keys.sh)
 #   bash <(curl -sL https://raw.githubusercontent.com/AFH666/hysteria2_afh/main/gen_keys.sh) --count 3
 #   bash <(curl -sL https://raw.githubusercontent.com/AFH666/hysteria2_afh/main/gen_keys.sh) --name alice
@@ -24,13 +24,11 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# --- Root check ---
 if [[ "$EUID" -ne 0 ]]; then
     echo "Запустите скрипт от root (sudo bash ...)"
     exit 1
 fi
 
-# --- Конфиг должен существовать ---
 if [[ ! -f "$CONFIG_FILE" ]]; then
     echo "❌ Конфиг не найден: $CONFIG_FILE"
     exit 1
@@ -54,15 +52,15 @@ get_insecure_flag() {
     [[ "$ISSUER" == "$SUBJECT" ]] && echo "1" || echo "0"
 }
 
-# --- Читаем obfs password из конфига ---
+# --- Читаем obfs password ---
 get_obfs_password() {
-    python3 - <<'PYEOF'
-import re, sys
-with open("/etc/hysteria/config.yaml", "r") as f:
+    python3 -c "
+import re
+with open('$CONFIG_FILE') as f:
     content = f.read()
 m = re.search(r'salamander:\s*\n\s+password:\s*(\S+)', content)
-print(m.group(1) if m else "")
-PYEOF
+print(m.group(1) if m else '')
+"
 }
 
 INSECURE=$(get_insecure_flag)
@@ -76,59 +74,65 @@ if [[ -z "$OBFS_PASSWORD" ]]; then
     exit 1
 fi
 
+# --- Резервная копия ---
+BACKUP="${CONFIG_FILE}.bak.$(date +%s)"
+cp "$CONFIG_FILE" "$BACKUP"
+
 echo ""
 echo "══════════════════════════════════════════════════════"
 echo "  Hysteria 2 — Добавление пользователей"
 echo "  Домен: $DOMAIN  |  insecure=$INSECURE"
-echo "══════════════════════════════════════════════════════"
-
-# --- Мигрируем auth type: password → userpass если нужно ---
-# Hysteria2 userpass формат:
-#   auth:
-#     type: userpass
-#     userpass:
-#       alice: password123
-#       bob:   password456
-#
-python3 - <<'PYEOF'
-import re, sys
-
-with open("/etc/hysteria/config.yaml", "r") as f:
-    content = f.read()
-
-# Проверяем текущий тип auth
-if re.search(r'auth:\s*\n\s+type:\s*userpass', content):
-    print("USERPASS")
-elif re.search(r'auth:\s*\n\s+type:\s*password', content):
-    print("PASSWORD")
-else:
-    print("UNKNOWN")
-PYEOF
-AUTH_TYPE=$(python3 - <<'PYEOF'
-import re
-with open("/etc/hysteria/config.yaml", "r") as f:
-    content = f.read()
-if re.search(r'auth:\s*\n\s+type:\s*userpass', content):
-    print("USERPASS")
-elif re.search(r'auth:\s*\n\s+type:\s*password', content):
-    print("PASSWORD")
-else:
-    print("UNKNOWN")
-PYEOF
-)
-
-echo "  Текущий тип auth: $AUTH_TYPE"
-
-# Резервная копия перед любыми изменениями
-BACKUP="${CONFIG_FILE}.bak.$(date +%s)"
-cp "$CONFIG_FILE" "$BACKUP"
 echo "  📋 Резервная копия: $BACKUP"
+echo "══════════════════════════════════════════════════════"
 echo ""
 
-GENERATED_LINKS=()
+# --- Определяем текущий тип auth ---
+AUTH_TYPE=$(python3 -c "
+import re
+with open('$CONFIG_FILE') as f:
+    content = f.read()
+if re.search(r'type:\s*userpass', content):
+    print('USERPASS')
+elif re.search(r'type:\s*password', content):
+    print('PASSWORD')
+else:
+    print('UNKNOWN')
+")
 
+# --- Если тип password — мигрируем в userpass ---
+# Старый одиночный пароль становится user_default
+if [[ "$AUTH_TYPE" == "PASSWORD" ]]; then
+    python3 -c "
+import re
+with open('$CONFIG_FILE') as f:
+    content = f.read()
+
+m = re.search(r'auth:\s*\n\s+type:\s*password\s*\n\s+password:\s*(\S+)', content)
+old_pass = m.group(1) if m else 'changeme'
+
+new_auth = '''auth:
+  type: userpass
+  userpass:
+    user_default: {old}
+'''.format(old=old_pass)
+
+content = re.sub(
+    r'auth:\s*\n\s+type:\s*password\s*\n\s+password:\s*\S+\s*\n',
+    new_auth,
+    content
+)
+
+with open('$CONFIG_FILE', 'w') as f:
+    f.write(content)
+"
+    echo "  ℹ️  Мигрировано: type: password → type: userpass"
+    echo "      Старый пароль сохранён как user_default"
+    echo ""
+    AUTH_TYPE="USERPASS"
+fi
+
+# --- Добавляем пользователей ---
 for i in $(seq 1 "$COUNT"); do
-    # Имя пользователя
     if [[ -n "$USERNAME" && "$COUNT" -eq 1 ]]; then
         USER="$USERNAME"
     elif [[ -n "$USERNAME" ]]; then
@@ -138,7 +142,9 @@ for i in $(seq 1 "$COUNT"); do
     fi
 
     PASSWORD=$(openssl rand -hex 16)
-    LINK="hysteria2://$PASSWORD@$DOMAIN:$MAIN_PORT/?sni=$DOMAIN&obfs=salamander&obfs-password=$OBFS_PASSWORD&insecure=$INSECURE&mport=$START_PORT-$END_PORT#$USER"
+
+    # Ссылка: hysteria2://username:password@host — формат userpass
+    LINK="hysteria2://$USER:$PASSWORD@$DOMAIN:$MAIN_PORT/?sni=$DOMAIN&obfs=salamander&obfs-password=$OBFS_PASSWORD&insecure=$INSECURE&mport=$START_PORT-$END_PORT#$USER"
 
     [[ "$COUNT" -gt 1 ]] && echo "--- Пользователь #$i ---"
     echo "  Имя:          $USER"
@@ -147,71 +153,57 @@ for i in $(seq 1 "$COUNT"); do
     echo "  $LINK"
     echo ""
 
-    GENERATED_LINKS+=("$LINK")
-
-    # Добавляем пользователя в конфиг
-    python3 - "$AUTH_TYPE" "$USER" "$PASSWORD" <<'PYEOF'
+    # Добавляем строку в блок userpass
+    python3 -c "
 import re, sys
-
-auth_type = sys.argv[1]
-username  = sys.argv[2]
-password  = sys.argv[3]
-
-with open("/etc/hysteria/config.yaml", "r") as f:
+with open('$CONFIG_FILE') as f:
     content = f.read()
 
-if auth_type == "USERPASS":
-    # Просто добавляем строку в существующий блок userpass:
-    # Ищем конец блока userpass: и вставляем перед следующим top-level ключом
-    content = re.sub(
-        r'(auth:\s*\n\s+type:\s*userpass\s*\n\s+userpass:\s*\n(?:\s+\S+:\s*\S+\s*\n)*)',
-        lambda m: m.group(0) + f'      {username}: {password}\n',
-        content
-    )
+# Добавляем новую строку в конец блока userpass:
+# Блок userpass заканчивается перед следующим top-level ключом (не с отступом)
+content = re.sub(
+    r'(  type: userpass\n  userpass:\n(?:    \S+: \S+\n)*)',
+    lambda m: m.group(0) + '    $USER: $PASSWORD\n',
+    content
+)
 
-elif auth_type == "PASSWORD":
-    # Мигрируем: вытаскиваем старый одиночный пароль, строим блок userpass
-    old_pass_match = re.search(r'auth:\s*\n\s+type:\s*password\s*\n\s+password:\s*(\S+)', content)
-    old_pass = old_pass_match.group(1) if old_pass_match else "user_default"
-    old_user = "user_default"
-
-    new_auth = (
-        f"auth:\n"
-        f"  type: userpass\n"
-        f"  userpass:\n"
-        f"    {old_user}: {old_pass}\n"
-        f"    {username}: {password}\n"
-    )
-    content = re.sub(
-        r'auth:\s*\n\s+type:\s*password\s*\n\s+password:\s*\S+\s*\n',
-        new_auth,
-        content
-    )
-
-with open("/etc/hysteria/config.yaml", "w") as f:
+with open('$CONFIG_FILE', 'w') as f:
     f.write(content)
-
-print(f"  ✅ Пользователь '{username}' добавлен в конфиг.")
-PYEOF
-
-    # Обновляем AUTH_TYPE после первой миграции
-    if [[ "$AUTH_TYPE" == "PASSWORD" ]]; then
-        AUTH_TYPE="USERPASS"
-    fi
+print('  ✅ Пользователь добавлен в конфиг.')
+"
 done
 
-# --- Перезапуск сервиса ---
+# --- Проверяем итоговый конфиг ---
 echo "══════════════════════════════════════════════════════"
-if systemctl is-active --quiet hysteria-server 2>/dev/null; then
+echo "  Итоговый блок auth в конфиге:"
+echo ""
+python3 -c "
+with open('$CONFIG_FILE') as f:
+    lines = f.readlines()
+in_auth = False
+for line in lines:
+    if line.startswith('auth:'):
+        in_auth = True
+    elif in_auth and not line.startswith(' ') and not line.startswith('\t'):
+        break
+    if in_auth:
+        print('  ' + line, end='')
+"
+echo ""
+
+# --- Перезапуск сервиса ---
+if systemctl is-active --quiet hysteria-server 2>/dev/null || \
+   systemctl is-enabled --quiet hysteria-server 2>/dev/null; then
     systemctl restart hysteria-server
     sleep 1
     if systemctl is-active --quiet hysteria-server; then
         echo "  ✅ hysteria-server перезапущен успешно."
     else
-        echo "  ❌ Сервис не запустился — откатываем конфиг..."
+        echo "  ❌ Сервис не запустился. Откатываем конфиг..."
         cp "$BACKUP" "$CONFIG_FILE"
         systemctl restart hysteria-server
-        echo "  ↩️  Конфиг восстановлен из резервной копии."
+        echo "  ↩️  Конфиг восстановлен. Ошибка hysteria:"
+        journalctl -u hysteria-server --no-pager -n 15
     fi
 else
     echo "  ℹ️  Сервис hysteria-server не активен — перезапуск пропущен."
