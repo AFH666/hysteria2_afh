@@ -1,10 +1,15 @@
 #!/bin/bash
 
 # === Hysteria 2 — Генератор ключей ===
+#
 # Использование:
-#   bash gen_keys.sh                — одиночная генерация
-#   bash gen_keys.sh --count 5      — сгенерировать 5 наборов
-#   bash gen_keys.sh --apply        — сгенерировать и применить к config.yaml
+#   bash gen_keys.sh                  — одна пара ключей + ссылка
+#   bash gen_keys.sh --count 5        — 5 наборов
+#   bash gen_keys.sh --apply          — сгенерировать и применить к config.yaml
+#
+# Через curl (аргументы передаются В bash, не в curl):
+#   bash <(curl -sL https://raw.githubusercontent.com/AFH666/hysteria2_afh/main/gen_keys.sh) --count 5
+#   bash <(curl -sL https://raw.githubusercontent.com/AFH666/hysteria2_afh/main/gen_keys.sh) --apply
 
 CONFIG_FILE="/etc/hysteria/config.yaml"
 COUNT=1
@@ -18,33 +23,24 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-generate_keys() {
-    local PASSWORD OBFS_PASSWORD
-    PASSWORD=$(openssl rand -hex 16)
-    OBFS_PASSWORD=$(openssl rand -hex 16)
-    echo "$PASSWORD $OBFS_PASSWORD"
-}
+# --- Домен из публичного IP ---
+PUBLIC_IP=$(curl -s4 icanhazip.com)
+if [[ -z "$PUBLIC_IP" ]]; then
+    echo "Ошибка: не удалось определить публичный IP." >&2
+    exit 1
+fi
+DOMAIN="${PUBLIC_IP}.sslip.io"
 
-# --- Домен берём только из IP сервера, как в install-скрипте ---
-get_domain() {
-    PUBLIC_IP=$(curl -s4 icanhazip.com)
-    if [[ -z "$PUBLIC_IP" ]]; then
-        echo "Ошибка: не удалось определить публичный IP." >&2
-        exit 1
-    fi
-    echo "${PUBLIC_IP}.sslip.io"
-}
-
-# --- insecure: сравниваем issuer и subject сертификата ---
+# --- insecure: самоподписанный если issuer == subject ---
 get_insecure_flag() {
     local CERT="/etc/hysteria/server.crt"
-    if [[ ! -f "$CERT" ]]; then echo "0"; return; fi
+    [[ ! -f "$CERT" ]] && echo "0" && return
+    local ISSUER SUBJECT
     ISSUER=$(openssl x509 -in "$CERT" -noout -issuer 2>/dev/null)
     SUBJECT=$(openssl x509 -in "$CERT" -noout -subject 2>/dev/null)
-    if [[ "$ISSUER" == "$SUBJECT" ]]; then echo "1"; else echo "0"; fi
+    [[ "$ISSUER" == "$SUBJECT" ]] && echo "1" || echo "0"
 }
 
-DOMAIN=$(get_domain)
 INSECURE=$(get_insecure_flag)
 MAIN_PORT=443
 START_PORT=20000
@@ -53,14 +49,14 @@ END_PORT=50000
 echo ""
 echo "══════════════════════════════════════════════════════"
 echo "  Hysteria 2 — Генератор ключей"
-echo "  Домен: $DOMAIN"
+echo "  Домен: $DOMAIN  |  insecure=$INSECURE"
 echo "══════════════════════════════════════════════════════"
 
 for i in $(seq 1 "$COUNT"); do
-    read -r PASSWORD OBFS_PASSWORD <<< "$(generate_keys)"
+    PASSWORD=$(openssl rand -hex 16)
+    OBFS_PASSWORD=$(openssl rand -hex 16)
 
     [[ "$COUNT" -gt 1 ]] && echo "" && echo "--- Набор #$i ---"
-
     echo ""
     echo "  Пароль:       $PASSWORD"
     echo "  Obfs пароль:  $OBFS_PASSWORD"
@@ -68,38 +64,66 @@ for i in $(seq 1 "$COUNT"); do
     echo "  hysteria2://$PASSWORD@$DOMAIN:$MAIN_PORT/?sni=$DOMAIN&obfs=salamander&obfs-password=$OBFS_PASSWORD&insecure=$INSECURE&mport=$START_PORT-$END_PORT#Hysteria2-Optimum"
     echo ""
 
+    # --apply: применяем только первый набор
     if [[ "$APPLY" -eq 1 && "$i" -eq 1 ]]; then
         if [[ ! -f "$CONFIG_FILE" ]]; then
             echo "  ⚠️  Конфиг не найден: $CONFIG_FILE — применение пропущено."
-        else
-            cp "$CONFIG_FILE" "${CONFIG_FILE}.bak.$(date +%s)"
+            continue
+        fi
 
-            # Заменяем auth.password
-            sed -i "s|^\(\s*password:\s*\).*|\1$PASSWORD|" "$CONFIG_FILE"
+        # Резервная копия
+        cp "$CONFIG_FILE" "${CONFIG_FILE}.bak.$(date +%s)"
+        echo "  📋 Резервная копия создана: ${CONFIG_FILE}.bak.*"
 
-            # Заменяем obfs salamander password через python3
-            python3 - "$OBFS_PASSWORD" <<'PYEOF'
+        # Патчим через python3 — надёжнее sed для YAML с отступами
+        python3 - <<PYEOF
 import re, sys
 
-new_pass = sys.argv[1]
-with open("/etc/hysteria/config.yaml", "r") as f:
+config_path = "$CONFIG_FILE"
+new_password = "$PASSWORD"
+new_obfs = "$OBFS_PASSWORD"
+
+with open(config_path, "r") as f:
     content = f.read()
 
+original = content
+
+# --- auth.password ---
+# Ищем блок auth: и меняем первый password: внутри него
 content = re.sub(
-    r'(obfs:\s*\n\s+type:\s*salamander\s*\n\s+salamander:\s*\n\s+password:\s*)(\S+)',
-    lambda m: m.group(1) + new_pass,
+    r'(auth:\s*\n(?:\s+\w+:\s*\S+\s*\n)*?\s+password:\s*)(\S+)',
+    lambda m: m.group(1) + new_password,
     content
 )
 
-with open("/etc/hysteria/config.yaml", "w") as f:
+# --- obfs.salamander.password ---
+content = re.sub(
+    r'(salamander:\s*\n\s+password:\s*)(\S+)',
+    lambda m: m.group(1) + new_obfs,
+    content
+)
+
+if content == original:
+    print("  ⚠️  Паттерны не найдены в конфиге — проверьте структуру YAML вручную.")
+    sys.exit(1)
+
+with open(config_path, "w") as f:
     f.write(content)
+
+print("  ✅ Конфиг обновлён.")
 PYEOF
 
+        if [[ $? -eq 0 ]]; then
             if systemctl is-active --quiet hysteria-server 2>/dev/null; then
                 systemctl restart hysteria-server
-                echo "  ✅ Конфиг обновлён, сервис перезапущен."
+                sleep 1
+                if systemctl is-active --quiet hysteria-server; then
+                    echo "  ✅ Сервис hysteria-server перезапущен успешно."
+                else
+                    echo "  ❌ Сервис не запустился после перезапуска — проверьте journalctl -u hysteria-server"
+                fi
             else
-                echo "  ✅ Конфиг обновлён (сервис не активен — перезапуск пропущен)."
+                echo "  ℹ️  Сервис hysteria-server не активен — перезапуск пропущен."
             fi
         fi
     fi
