@@ -1,9 +1,9 @@
-**deploy.sh**
+**Установка**
 ```bash
 curl -L https://raw.githubusercontent.com/AFH666/hysteria2_afh/main/deploy.sh | bash
 ```
 
-**deploy_v2.sh**
+**Установка v2 (обход сертификата)**
 ```bash
 curl -L https://raw.githubusercontent.com/AFH666/hysteria2_afh/main/deploy_v2.sh | bash
 ```
