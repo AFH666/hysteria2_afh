@@ -27,3 +27,8 @@ curl -L https://raw.githubusercontent.com/AFH666/hysteria2_afh/main/gen_keys.sh 
 Генерация 5 ключей с ссылками конфигов, и записью в config.yaml + перезагрузка**
 ```bash
 bash <(curl -sL https://raw.githubusercontent.com/AFH666/hysteria2_afh/main/gen_keys.sh) --count 5 --apply
+```
+**Перезапуск систем Hysteria**
+```bash
+systemctl restart hysteria-server.service
+```
