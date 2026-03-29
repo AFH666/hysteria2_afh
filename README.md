@@ -15,10 +15,15 @@ curl -L https://raw.githubusercontent.com/AFH666/hysteria2_afh/main/gen_keys.sh 
 
 **Сгенерировать 5 ключей + ссылки**
 ```bash
-curl -L https://raw.githubusercontent.com/AFH666/hysteria2_afh/main/gen_keys.sh --count 5 | bash
+--count 5
 ```
 
 **Сгенерировать + сразу применить к config.yaml и перезапустить сервис**
 ```bash
-curl -L https://raw.githubusercontent.com/AFH666/hysteria2_afh/main/gen_keys.sh --apply | bash
+--apply
 ```
+
+**Пример:
+Генерация 5 ключей с записью в config.yaml + перезагрузка**
+```bash
+bash <(curl -sL https://raw.githubusercontent.com/AFH666/hysteria2_afh/main/gen_keys.sh) --count 5 --apply
